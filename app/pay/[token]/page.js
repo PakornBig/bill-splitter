@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import { createClient } from "@/lib/supabase/server";
 import { buildPromptPayPayload, maskPromptPayId } from "@/lib/promptpay";
 import { formatDate, formatMoney } from "@/lib/utils";
+import SlipUpload from "@/components/SlipUpload";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
@@ -85,7 +86,14 @@ export default async function PayPage({ params }) {
               open={unpaid.length === 1}
             >
               <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-3">
-                <span className="font-medium text-slate-900">{s.name}</span>
+                <span className="flex items-center gap-2">
+                  <span className="font-medium text-slate-900">{s.name}</span>
+                  {s.slip_submitted && (
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                      รอตรวจสลิป
+                    </span>
+                  )}
+                </span>
                 <span className="flex items-center gap-2">
                   <span className="font-bold text-slate-900">
                     {formatMoney(Number(s.amount), currency)}
@@ -118,6 +126,10 @@ export default async function PayPage({ params }) {
                   </p>
                 </div>
               )}
+
+              <div className="px-5 pb-4">
+                <SlipUpload token={params.token} shareId={s.id} submitted={!!s.slip_submitted} />
+              </div>
             </details>
           )
         )}
@@ -166,7 +178,7 @@ export default async function PayPage({ params }) {
       )}
 
       <p className="text-center text-xs text-slate-400">
-        จ่ายแล้วแจ้งเจ้าของบิลเพื่ออัปเดตสถานะ
+        โอนแล้วแนบสลิป เจ้าของบิลจะตรวจสอบและยืนยันให้
       </p>
     </main>
   );

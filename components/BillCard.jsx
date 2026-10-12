@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { togglePaid, deleteBill } from "@/app/(app)/bills/actions";
+import { togglePaid, deleteBill, rejectSlip } from "@/app/(app)/bills/actions";
 import { formatMoney, formatDate } from "@/lib/utils";
 
 const SPLIT_LABELS = {
@@ -128,7 +128,8 @@ export default function BillCard({ bill, currency, hasPromptPay }) {
 
       <ul className="mt-4 divide-y divide-slate-100 border-t border-slate-100">
         {shares.map((s) => (
-          <li key={s.id} className="flex items-center justify-between py-2">
+          <li key={s.id} className="py-2">
+          <div className="flex items-center justify-between">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input
                 type="checkbox"
@@ -155,6 +156,76 @@ export default function BillCard({ bill, currency, hasPromptPay }) {
             >
               {formatMoney(Number(s.amount), currency)}
             </span>
+          </div>
+
+          {s.slip_path && (
+            <div
+              className={`mt-2 flex items-center gap-3 rounded-lg px-3 py-2 ${
+                s.is_paid ? "bg-slate-50" : "bg-blue-50"
+              }`}
+            >
+              {s.slip_url ? (
+                <a
+                  href={s.slip_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0"
+                  aria-label={`เปิดสลิปของ ${s.people?.name ?? ""}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={s.slip_url}
+                    alt=""
+                    className="h-14 w-14 rounded-md border border-slate-200 object-cover"
+                  />
+                </a>
+              ) : (
+                <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md bg-slate-200 text-xs text-slate-500">
+                  สลิป
+                </span>
+              )}
+              <div className="min-w-0 flex-1 text-xs">
+                <p className={s.is_paid ? "text-slate-500" : "font-medium text-blue-800"}>
+                  {s.is_paid ? "✓ ยืนยันสลิปแล้ว" : "📎 รอตรวจสลิป"}
+                </p>
+                {s.slip_submitted_at && (
+                  <p className="text-slate-500">
+                    ส่งเมื่อ{" "}
+                    {new Date(s.slip_submitted_at).toLocaleString("th-TH", {
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    })}
+                  </p>
+                )}
+              </div>
+              {!s.is_paid && (
+                <div className="flex shrink-0 gap-1.5">
+                  <button
+                    type="button"
+                    className="btn-primary !px-2.5 !py-1 text-xs"
+                    disabled={pending}
+                    onClick={() => startTransition(() => togglePaid(s.id, true))}
+                  >
+                    ✓ ยืนยัน
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-danger !px-2.5 !py-1 text-xs"
+                    disabled={pending}
+                    onClick={() => {
+                      if (confirm(`ปฏิเสธสลิปของ ${s.people?.name ?? ""}? เพื่อนจะต้องส่งสลิปใหม่`)) {
+                        startTransition(async () => {
+                          await rejectSlip(s.id);
+                        });
+                      }
+                    }}
+                  >
+                    ปฏิเสธ
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           </li>
         ))}
       </ul>

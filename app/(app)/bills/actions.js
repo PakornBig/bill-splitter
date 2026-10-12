@@ -178,8 +178,46 @@ export async function markSharesPaid(shareIds) {
   revalidatePath("/outstanding");
 }
 
+// ปฏิเสธสลิป: ลบไฟล์และล้างสถานะ ให้เพื่อนส่งใหม่ได้
+export async function rejectSlip(shareId) {
+  const supabase = createClient();
+  // RLS ทำให้เห็นเฉพาะ share ในบิลของตัวเอง
+  const { data: share } = await supabase
+    .from("bill_shares")
+    .select("slip_path")
+    .eq("id", shareId)
+    .single();
+  if (!share) return { error: "ไม่พบรายการนี้" };
+
+  const { error } = await supabase
+    .from("bill_shares")
+    .update({ slip_path: null, slip_submitted_at: null, is_paid: false, paid_at: null })
+    .eq("id", shareId);
+  if (error) return { error: error.message };
+
+  if (share.slip_path) {
+    await supabase.storage.from("slips").remove([share.slip_path]);
+  }
+
+  revalidatePath("/bills");
+  revalidatePath("/outstanding");
+  return {};
+}
+
 export async function deleteBill(billId) {
   const supabase = createClient();
+
+  // ลบไฟล์สลิปของบิลนี้ใน Storage ด้วย (แถวในตารางถูกลบตาม cascade แต่ไฟล์ไม่ถูกลบเอง)
+  const { data: shares } = await supabase
+    .from("bill_shares")
+    .select("slip_path")
+    .eq("bill_id", billId)
+    .not("slip_path", "is", null);
+  const paths = (shares ?? []).map((s) => s.slip_path).filter(Boolean);
+  if (paths.length > 0) {
+    await supabase.storage.from("slips").remove(paths);
+  }
+
   await supabase.from("bills").delete().eq("id", billId);
   revalidatePath("/bills");
   revalidatePath("/outstanding");

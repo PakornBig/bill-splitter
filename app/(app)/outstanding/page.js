@@ -11,7 +11,7 @@ export default async function OutstandingPage() {
   const [{ data: shares }, profile] = await Promise.all([
     supabase
       .from("bill_shares")
-      .select("id, amount, person_id, people(id, name), bills(id, title, created_at)")
+      .select("id, amount, person_id, slip_path, people(id, name), bills(id, title, created_at)")
       .eq("is_paid", false),
     getProfile(),
   ]);
@@ -68,7 +68,14 @@ export default async function OutstandingPage() {
                 {g.items.map((it) => (
                   <li key={it.id} className="flex items-center justify-between py-2 text-sm">
                     <div>
-                      <p className="text-slate-700">{it.bills?.title}</p>
+                      <p className="text-slate-700">
+                        {it.bills?.title}
+                        {it.slip_path && (
+                          <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                            📎 รอตรวจสลิป
+                          </span>
+                        )}
+                      </p>
                       <p className="text-xs text-slate-400">
                         {it.bills ? formatDate(it.bills.created_at) : ""}
                       </p>

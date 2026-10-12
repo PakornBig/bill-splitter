@@ -245,6 +245,164 @@ revoke all on function public.get_shared_bill(uuid) from public;
 grant execute on function public.get_shared_bill(uuid) to anon, authenticated;
 
 -- ===================================================================
+-- แนบสลิปโอนเงิน (เพื่อนอัปโหลดผ่านลิงก์ -> เจ้าของบิลตรวจและยืนยัน)
+-- ===================================================================
+
+alter table public.bill_shares add column if not exists slip_path text;
+alter table public.bill_shares add column if not exists slip_submitted_at timestamptz;
+
+-- bucket แบบ private จำกัดเฉพาะรูป ไม่เกิน 5MB
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('slips', 'slips', false, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do update
+  set public = false,
+      file_size_limit = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+
+-- path ของไฟล์: <share_token>/<bill_share_id>/<ชื่อไฟล์>
+-- อัปโหลดได้เฉพาะถ้า token กับ share ตรงกัน และ share นั้นยังไม่จ่าย
+create or replace function public.can_upload_slip(object_name text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.bills b
+    join public.bill_shares s on s.bill_id = b.id
+    where b.share_token::text = (storage.foldername(object_name))[1]
+      and s.id::text = (storage.foldername(object_name))[2]
+      and s.is_paid = false
+  );
+$$;
+
+-- เป็นเจ้าของบิลที่ไฟล์นี้อยู่หรือไม่
+create or replace function public.owns_slip(object_name text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.bills b
+    where b.share_token::text = (storage.foldername(object_name))[1]
+      and b.owner_id = auth.uid()
+  );
+$$;
+
+grant execute on function public.can_upload_slip(text) to anon, authenticated;
+grant execute on function public.owns_slip(text) to authenticated;
+
+-- คนมีลิงก์: อัปโหลดได้อย่างเดียว (ดู/ลบ/เขียนทับไม่ได้)
+drop policy if exists "slips upload via share link" on storage.objects;
+create policy "slips upload via share link" on storage.objects
+  for insert to anon, authenticated
+  with check (bucket_id = 'slips' and public.can_upload_slip(name));
+
+-- เจ้าของบิล: ดูและลบสลิปของบิลตัวเอง
+drop policy if exists "slips owner read" on storage.objects;
+create policy "slips owner read" on storage.objects
+  for select to authenticated
+  using (bucket_id = 'slips' and public.owns_slip(name));
+
+drop policy if exists "slips owner delete" on storage.objects;
+create policy "slips owner delete" on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'slips' and public.owns_slip(name));
+
+-- บันทึกว่าส่งสลิปแล้ว (เรียกหลังอัปโหลดไฟล์สำเร็จ)
+create or replace function public.submit_slip(p_token uuid, p_share_id uuid, p_path text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if p_path is null or p_path not like (p_token::text || '/' || p_share_id::text || '/%') then
+    raise exception 'invalid slip path';
+  end if;
+
+  if not exists (select 1 from storage.objects where bucket_id = 'slips' and name = p_path) then
+    raise exception 'slip file not found';
+  end if;
+
+  update public.bill_shares s
+  set slip_path = p_path,
+      slip_submitted_at = now()
+  from public.bills b
+  where b.id = s.bill_id
+    and b.share_token = p_token
+    and s.id = p_share_id
+    and s.is_paid = false;
+
+  if not found then
+    raise exception 'share not found or already paid';
+  end if;
+end;
+$$;
+
+revoke all on function public.submit_slip(uuid, uuid, text) from public;
+grant execute on function public.submit_slip(uuid, uuid, text) to anon, authenticated;
+
+-- อัปเดตข้อมูลที่หน้าลิงก์เห็น: เพิ่มสถานะว่าส่งสลิปแล้วหรือยัง (ไม่ส่ง path รูปออกไป)
+create or replace function public.get_shared_bill(p_token uuid)
+returns json
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select json_build_object(
+    'title', b.title,
+    'note', b.note,
+    'created_at', b.created_at,
+    'split_type', b.split_type,
+    'subtotal', b.subtotal,
+    'discount_amount', b.discount_amount,
+    'delivery_fee', b.delivery_fee,
+    'total_amount', b.total_amount,
+    'owner_name', pr.display_name,
+    'currency', coalesce(pr.currency, 'THB'),
+    'promptpay_id', pr.promptpay_id,
+    'items', coalesce((
+      select json_agg(json_build_object(
+        'name', i.name,
+        'unit_price', i.unit_price,
+        'quantity', i.quantity,
+        'eaters', coalesce((
+          select json_agg(pe.name order by pe.name)
+          from public.bill_item_people ip
+          join public.people pe on pe.id = ip.person_id
+          where ip.item_id = i.id
+        ), '[]'::json)
+      ) order by i.position)
+      from public.bill_items i
+      where i.bill_id = b.id
+    ), '[]'::json),
+    'shares', coalesce((
+      select json_agg(json_build_object(
+        'id', s.id,
+        'name', pe.name,
+        'amount', s.amount,
+        'is_paid', s.is_paid,
+        'slip_submitted', s.slip_path is not null,
+        'slip_submitted_at', s.slip_submitted_at
+      ) order by pe.name)
+      from public.bill_shares s
+      join public.people pe on pe.id = s.person_id
+      where s.bill_id = b.id
+    ), '[]'::json)
+  )
+  from public.bills b
+  left join public.profiles pr on pr.id = b.owner_id
+  where b.share_token = p_token;
+$$;
+
+-- ===================================================================
 -- สร้าง profile ให้ user ที่สมัครไว้ก่อนรัน schema นี้ (ถ้ามี)
 -- ===================================================================
 insert into public.profiles (id, display_name)

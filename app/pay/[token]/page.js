@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { buildPromptPayPayload, maskPromptPayId } from "@/lib/promptpay";
 import { formatDate, formatMoney } from "@/lib/utils";
 import SlipUpload from "@/components/SlipUpload";
+import PayCardImage from "@/components/PayCardImage";
 
 export const dynamic = "force-dynamic";
 export const metadata = {
@@ -122,8 +123,17 @@ export default async function PayPage({ params }) {
                     {bill.owner_name && <> · {bill.owner_name}</>}
                   </p>
                   <p className="mt-2 text-xs text-slate-500">
-                    สแกนด้วยแอปธนาคาร หรือกดค้างที่รูปเพื่อบันทึก แล้วเลือกรูปจากแอปธนาคาร
+                    สแกนด้วยแอปธนาคาร หรือบันทึกรูปแล้วเลือกรูปจากแอปธนาคาร
                   </p>
+                  <PayCardImage
+                    qr={s.qr}
+                    title={bill.title}
+                    name={s.name}
+                    amountText={formatMoney(Number(s.amount), currency)}
+                    promptpayText={`PromptPay ${maskPromptPayId(bill.promptpay_id)}`}
+                    ownerName={bill.owner_name ?? ""}
+                    dateText={formatDate(bill.created_at)}
+                  />
                 </div>
               )}
 

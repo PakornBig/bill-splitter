@@ -1,9 +1,9 @@
 "use client";
 
 import { useRef, useState, useTransition } from "react";
-import { createBill } from "@/app/(app)/bills/actions";
+import { createBill, updateBill } from "@/app/(app)/bills/actions";
 import { formatMoney } from "@/lib/utils";
-import { calcBill, computeShares, fromCents, itemCents } from "@/lib/billCalc";
+import { calcBill, computeShares, fromCents, itemCents, toCents } from "@/lib/billCalc";
 
 const SPLIT_TYPES = [
   { value: "by_item", label: "หารตามเมนู", hint: "แต่ละคนจ่ายตามเมนูที่กิน" },
@@ -14,18 +14,89 @@ const SPLIT_TYPES = [
 const blankItem = (key, eaters = []) => ({ key, name: "", price: "", qty: "1", eaters });
 const blankTier = (key) => ({ key, minSpend: "", type: "amount", value: "", maxDiscount: "" });
 
-export default function CreateBillForm({ people, currency }) {
-  const keyRef = useRef(1);
+// ตัวเลขจาก DB -> ค่าในช่องกรอก (0 หรือว่าง = เว้นช่องไว้)
+const numText = (v) => (Number(v) > 0 ? String(Number(v)) : "");
+
+/** สร้าง state เริ่มต้นของฟอร์ม จากบิลเดิม (โหมดแก้ไข) หรือค่าว่าง (โหมดสร้าง) */
+function buildInitial(bill, people) {
+  let key = 0;
+  if (!bill) {
+    return {
+      title: "",
+      note: "",
+      splitType: "by_item",
+      selected: [],
+      items: [blankItem(key++)],
+      tiers: [],
+      delivery: "",
+      custom: {},
+      nextKey: key,
+    };
+  }
+
+  const shares = bill.bill_shares ?? [];
+  const sharePids = new Set(shares.map((s) => s.person_id));
+  // เรียงตามลำดับในรายชื่อ และข้ามคนที่ถูกลบไปแล้ว
+  const selected = people.filter((p) => sharePids.has(p.id)).map((p) => p.id);
+
+  const items = [...(bill.bill_items ?? [])]
+    .sort((a, b) => a.position - b.position)
+    .map((it) => ({
+      key: key++,
+      name: it.name ?? "",
+      price: String(Number(it.unit_price ?? 0)),
+      qty: String(it.quantity ?? 1),
+      eaters: (it.bill_item_people ?? [])
+        .map((x) => x.person_id)
+        .filter((pid) => selected.includes(pid)),
+    }));
+  // บิลเก่าที่สร้างก่อนมีระบบเมนูจะไม่มีรายการ ให้เริ่มด้วยแถวว่าง 1 แถว
+  if (items.length === 0) items.push(blankItem(key++, [...selected]));
+
+  const tiers = (Array.isArray(bill.discount_tiers) ? bill.discount_tiers : []).map((t) => ({
+    key: key++,
+    minSpend: numText(t.minSpend),
+    type: t.type === "percent" ? "percent" : "amount",
+    value: numText(t.value),
+    maxDiscount: numText(t.maxDiscount),
+  }));
+
+  const custom =
+    bill.split_type === "custom"
+      ? Object.fromEntries(shares.map((s) => [s.person_id, String(Number(s.amount))]))
+      : {};
+
+  return {
+    title: bill.title ?? "",
+    note: bill.note ?? "",
+    splitType: ["by_item", "equal", "custom"].includes(bill.split_type) ? bill.split_type : "equal",
+    selected,
+    items,
+    tiers,
+    delivery: numText(bill.delivery_fee),
+    custom,
+    nextKey: key,
+  };
+}
+
+/**
+ * ฟอร์มสร้างบิล / แก้ไขบิล
+ * ส่ง `bill` (พร้อม bill_items, bill_item_people, bill_shares) มาเพื่อเปิดในโหมดแก้ไข
+ */
+export default function CreateBillForm({ people, currency, bill = null }) {
+  const isEdit = !!bill;
+  const [init] = useState(() => buildInitial(bill, people));
+  const keyRef = useRef(init.nextKey);
   const nextKey = () => keyRef.current++;
 
-  const [title, setTitle] = useState("");
-  const [note, setNote] = useState("");
-  const [splitType, setSplitType] = useState("by_item");
-  const [selected, setSelected] = useState([]);
-  const [items, setItems] = useState(() => [blankItem(0)]);
-  const [tiers, setTiers] = useState([]);
-  const [delivery, setDelivery] = useState("");
-  const [custom, setCustom] = useState({});
+  const [title, setTitle] = useState(init.title);
+  const [note, setNote] = useState(init.note);
+  const [splitType, setSplitType] = useState(init.splitType);
+  const [selected, setSelected] = useState(init.selected);
+  const [items, setItems] = useState(init.items);
+  const [tiers, setTiers] = useState(init.tiers);
+  const [delivery, setDelivery] = useState(init.delivery);
+  const [custom, setCustom] = useState(init.custom);
   const [error, setError] = useState(null);
   const [pending, startTransition] = useTransition();
 
@@ -49,6 +120,26 @@ export default function CreateBillForm({ people, currency }) {
 
   const filledItems = items.filter((it) => it.name.trim() || it.price !== "");
   const pieceCount = filledItems.reduce((s, it) => s + (Math.floor(Number(it.qty)) || 0), 0);
+
+  // โหมดแก้ไข: เตือนถ้าการแก้จะกระทบคนที่จ่ายแล้ว/ส่งสลิปแล้ว (ตรงกับ shareStatusAfterEdit ฝั่ง server)
+  const editWarnings =
+    isEdit && !shares.error
+      ? (bill.bill_shares ?? []).flatMap((s) => {
+          const name = s.people?.name ?? nameOf(s.person_id) ?? "";
+          if (!selected.includes(s.person_id)) {
+            if (s.slip_path) return [`${name}: ถูกเอาออกจากบิล สลิปที่ส่งมาจะถูกลบ`];
+            if (s.is_paid && Number(s.amount) > 0) return [`${name}: จ่ายแล้วแต่ถูกเอาออกจากบิล`];
+            return [];
+          }
+          const oldCents = toCents(s.amount);
+          const newCents = shares.details[s.person_id]?.amount ?? 0;
+          if (newCents === 0 || newCents === oldCents) return [];
+          const change = `ยอดเปลี่ยนจาก ${fm(oldCents)} เป็น ${fm(newCents)}`;
+          if (s.is_paid) return [`${name}: ${change} จะกลับเป็น "ยังไม่จ่าย"`];
+          if (s.slip_path) return [`${name}: ${change} ตรวจสลิปที่ส่งมาอีกครั้ง`];
+          return [];
+        })
+      : [];
 
   // ---------- คนร่วมหาร ----------
   function setParticipants(nextIds) {
@@ -99,7 +190,7 @@ export default function CreateBillForm({ people, currency }) {
     if (shares.error) return setError(shares.error);
 
     startTransition(async () => {
-      const res = await createBill({
+      const payload = {
         title,
         note,
         splitType,
@@ -113,7 +204,8 @@ export default function CreateBillForm({ people, currency }) {
         })),
         deliveryFee: delivery,
         customAmounts: custom,
-      });
+      };
+      const res = isEdit ? await updateBill(bill.id, payload) : await createBill(payload);
       if (res?.error) setError(res.error);
     });
   }
@@ -499,11 +591,24 @@ export default function CreateBillForm({ people, currency }) {
           </p>
         )}
 
+        {editWarnings.length > 0 && (
+          <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p className="font-medium">การแก้ไขนี้กระทบคนที่จ่ายแล้วหรือส่งสลิปแล้ว</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+              {editWarnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <button type="submit" disabled={pending} className="btn-primary w-full">
           {pending ? (
             <>
               <span className="spinner" aria-hidden="true" /> กำลังบันทึก...
             </>
+          ) : isEdit ? (
+            "บันทึกการแก้ไข"
           ) : (
             "บันทึกบิล"
           )}

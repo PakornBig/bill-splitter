@@ -404,6 +404,101 @@ as $$
 $$;
 
 -- ===================================================================
+-- แก้ไขบิล: เขียนบิล เมนู และยอดของแต่ละคนใน transaction เดียว
+-- ยอดทั้งหมดคำนวณมาจาก server action แล้ว ฟังก์ชันนี้มีหน้าที่บันทึกอย่างเดียว
+-- ไม่ใช้ security definer → RLS ของแต่ละตารางยังคุมสิทธิ์เหมือนเดิม
+--
+-- p_bill   = { title, note, split_type, subtotal, discount_amount, delivery_fee,
+--              discount_tiers, total_amount }
+-- p_items  = [{ name, unit_price, quantity, eaters: [person_id] }]
+-- p_shares = [{ id (null = คนใหม่), person_id, amount, is_paid, paid_at }]
+--            share เดิมที่ไม่อยู่ในรายการจะถูกลบ (ไฟล์สลิปให้ฝั่ง app ลบเอง)
+-- ===================================================================
+create or replace function public.update_bill(
+  p_bill_id uuid,
+  p_bill jsonb,
+  p_items jsonb,
+  p_shares jsonb
+)
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_item jsonb;
+  v_item_id uuid;
+  v_pos integer := 0;
+begin
+  update public.bills
+  set title = p_bill->>'title',
+      note = nullif(p_bill->>'note', ''),
+      split_type = p_bill->>'split_type',
+      subtotal = (p_bill->>'subtotal')::numeric,
+      discount_amount = (p_bill->>'discount_amount')::numeric,
+      delivery_fee = (p_bill->>'delivery_fee')::numeric,
+      discount_tiers = coalesce(p_bill->'discount_tiers', '[]'::jsonb),
+      total_amount = (p_bill->>'total_amount')::numeric
+  where id = p_bill_id and owner_id = auth.uid();
+
+  if not found then
+    raise exception 'bill not found';
+  end if;
+
+  -- เมนู: ลบของเดิมทั้งหมด (bill_item_people ถูกลบตาม cascade) แล้วใส่ใหม่
+  delete from public.bill_items where bill_id = p_bill_id;
+
+  for v_item in select value from jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) loop
+    insert into public.bill_items (bill_id, name, unit_price, quantity, position)
+    values (
+      p_bill_id,
+      v_item->>'name',
+      (v_item->>'unit_price')::numeric,
+      (v_item->>'quantity')::integer,
+      v_pos
+    )
+    returning id into v_item_id;
+
+    insert into public.bill_item_people (item_id, person_id)
+    select distinct v_item_id, e::uuid
+    from jsonb_array_elements_text(coalesce(v_item->'eaters', '[]'::jsonb)) as e;
+
+    v_pos := v_pos + 1;
+  end loop;
+
+  -- ยอดของแต่ละคน: ลบคนที่ถูกเอาออก, อัปเดตคนเดิม, เพิ่มคนใหม่
+  delete from public.bill_shares
+  where bill_id = p_bill_id
+    and id not in (
+      select (s->>'id')::uuid
+      from jsonb_array_elements(coalesce(p_shares, '[]'::jsonb)) as s
+      where nullif(s->>'id', '') is not null
+    );
+
+  update public.bill_shares bs
+  set amount = (s->>'amount')::numeric,
+      is_paid = (s->>'is_paid')::boolean,
+      paid_at = nullif(s->>'paid_at', '')::timestamptz
+  from jsonb_array_elements(coalesce(p_shares, '[]'::jsonb)) as s
+  where nullif(s->>'id', '') is not null
+    and bs.id = (s->>'id')::uuid
+    and bs.bill_id = p_bill_id;
+
+  insert into public.bill_shares (bill_id, person_id, amount, is_paid, paid_at)
+  select
+    p_bill_id,
+    (s->>'person_id')::uuid,
+    (s->>'amount')::numeric,
+    (s->>'is_paid')::boolean,
+    nullif(s->>'paid_at', '')::timestamptz
+  from jsonb_array_elements(coalesce(p_shares, '[]'::jsonb)) as s
+  where nullif(s->>'id', '') is null;
+end;
+$$;
+
+revoke all on function public.update_bill(uuid, jsonb, jsonb, jsonb) from public, anon;
+grant execute on function public.update_bill(uuid, jsonb, jsonb, jsonb) to authenticated;
+
+-- ===================================================================
 -- สร้าง profile ให้ user ที่สมัครไว้ก่อนรัน schema นี้ (ถ้ามี)
 -- ===================================================================
 insert into public.profiles (id, display_name)

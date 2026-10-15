@@ -3,27 +3,22 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { calcBill, computeShares, fromCents } from "@/lib/billCalc";
+import { calcBill, computeShares, fromCents, shareStatusAfterEdit } from "@/lib/billCalc";
 
 const SPLIT_TYPES = ["equal", "by_item", "custom"];
 const TIER_TYPES = ["amount", "percent"];
 
 /**
- * สร้างบิลใหม่ ยอดทั้งหมดถูกคำนวณซ้ำฝั่ง server ไม่เชื่อตัวเลขจากหน้าเว็บ
+ * ตรวจข้อมูลบิลจากหน้าเว็บ แล้วคำนวณยอดทั้งหมดใหม่ฝั่ง server (ไม่เชื่อตัวเลขจากหน้าเว็บ)
  * input = {
  *   title, note, splitType, participants: string[],
  *   items: { name, price, qty, eaters: string[] }[],
  *   tiers: { minSpend?, type, value, maxDiscount? }[],
  *   deliveryFee, customAmounts: { [personId]: number }
  * }
+ * คืนค่า { error } หรือ { title, note, splitType, participants, items, tiers, calc, details }
  */
-export async function createBill(input) {
-  const supabase = createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { error: "ไม่ได้เข้าสู่ระบบ" };
-
+function parseBillInput(input) {
   const title = String(input?.title ?? "").trim();
   const note = String(input?.note ?? "").trim();
   const splitType = input?.splitType;
@@ -92,6 +87,21 @@ export async function createBill(input) {
   });
   if (shareErr) return { error: shareErr };
 
+  return { title, note, splitType, participants, items, tiers, calc, details };
+}
+
+/** สร้างบิลใหม่ */
+export async function createBill(input) {
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { error: "ไม่ได้เข้าสู่ระบบ" };
+
+  const parsed = parseBillInput(input);
+  if (parsed.error) return { error: parsed.error };
+  const { title, note, splitType, participants, items, tiers, calc, details } = parsed;
+
   // 1) บิล
   const { data: bill, error: billErr } = await supabase
     .from("bills")
@@ -157,6 +167,82 @@ export async function createBill(input) {
     })
   );
   if (sharesErr) return fail("บันทึกรายการหารไม่สำเร็จ: " + sharesErr.message);
+
+  revalidatePath("/bills");
+  revalidatePath("/outstanding");
+  redirect("/bills");
+}
+
+/**
+ * แก้ไขบิลเดิม (input แบบเดียวกับ createBill)
+ * - share ของคนเดิมใช้ id เดิม ลิงก์จ่ายเงินและสลิปที่ส่งมาแล้วจึงยังผูกกับคนเดิม
+ * - สถานะจ่ายแล้วคงไว้ถ้ายอดไม่เปลี่ยน, ยอดเปลี่ยนจะกลับเป็นยังไม่จ่าย (ดู shareStatusAfterEdit)
+ * - คนที่ถูกเอาออกจากบิล: ลบ share และไฟล์สลิปของคนนั้น
+ */
+export async function updateBill(billId, input) {
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { error: "ไม่ได้เข้าสู่ระบบ" };
+  if (!billId) return { error: "ไม่พบบิลนี้" };
+
+  const parsed = parseBillInput(input);
+  if (parsed.error) return { error: parsed.error };
+  const { title, note, splitType, participants, items, tiers, calc, details } = parsed;
+
+  // RLS ทำให้เห็นเฉพาะบิลของตัวเอง
+  const { data: bill } = await supabase
+    .from("bills")
+    .select("id, bill_shares(id, person_id, amount, is_paid, paid_at, slip_path)")
+    .eq("id", billId)
+    .maybeSingle();
+  if (!bill) return { error: "ไม่พบบิลนี้" };
+
+  const prevByPerson = Object.fromEntries(
+    (bill.bill_shares ?? []).map((s) => [s.person_id, s])
+  );
+  const now = new Date().toISOString();
+  const shares = participants.map((pid) => {
+    const prev = prevByPerson[pid];
+    const cents = details[pid]?.amount ?? 0;
+    return {
+      id: prev?.id ?? null,
+      person_id: pid,
+      amount: fromCents(cents),
+      ...shareStatusAfterEdit(prev, cents, now),
+    };
+  });
+  const removedSlips = (bill.bill_shares ?? [])
+    .filter((s) => !participants.includes(s.person_id) && s.slip_path)
+    .map((s) => s.slip_path);
+
+  const { error } = await supabase.rpc("update_bill", {
+    p_bill_id: billId,
+    p_bill: {
+      title,
+      note,
+      split_type: splitType,
+      subtotal: fromCents(calc.subtotalCents),
+      discount_amount: fromCents(calc.discountCents),
+      delivery_fee: fromCents(calc.deliveryCents),
+      discount_tiers: tiers,
+      total_amount: fromCents(calc.totalCents),
+    },
+    p_items: items.map((it) => ({
+      name: it.name,
+      unit_price: it.price,
+      quantity: it.qty,
+      eaters: it.eaters,
+    })),
+    p_shares: shares,
+  });
+  if (error) return { error: "บันทึกการแก้ไขไม่สำเร็จ: " + error.message };
+
+  // ลบไฟล์สลิปของคนที่ถูกเอาออก (ทำหลังบันทึกสำเร็จ ถ้าพลาดก็แค่เหลือไฟล์ค้าง)
+  if (removedSlips.length > 0) {
+    await supabase.storage.from("slips").remove(removedSlips);
+  }
 
   revalidatePath("/bills");
   revalidatePath("/outstanding");

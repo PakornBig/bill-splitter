@@ -259,6 +259,13 @@ export default function BillCard({ bill, currency, hasPromptPay }) {
             </a>
           </>
         )}
+        <Link
+          href={`/bills/${bill.id}/edit`}
+          className="btn-secondary !px-3 !py-1 text-xs"
+          aria-label={`แก้ไขบิล ${bill.title}`}
+        >
+          ✏️ แก้ไข
+        </Link>
         <button
           className="btn-danger !px-3 !py-1 text-xs"
           disabled={pending}

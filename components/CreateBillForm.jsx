@@ -12,7 +12,7 @@ const SPLIT_TYPES = [
 ];
 
 const blankItem = (key, eaters = []) => ({ key, name: "", price: "", qty: "1", eaters });
-const blankTier = (key) => ({ key, minSpend: "", type: "amount", value: "" });
+const blankTier = (key) => ({ key, minSpend: "", type: "amount", value: "", maxDiscount: "" });
 
 export default function CreateBillForm({ people, currency }) {
   const keyRef = useRef(1);
@@ -105,7 +105,12 @@ export default function CreateBillForm({ people, currency }) {
         splitType,
         participants: participantIds,
         items: filledItems.map(({ name, price, qty, eaters }) => ({ name, price, qty, eaters })),
-        tiers: tiers.map(({ minSpend, type, value }) => ({ minSpend, type, value })),
+        tiers: tiers.map(({ minSpend, type, value, maxDiscount }) => ({
+          minSpend,
+          type,
+          value,
+          maxDiscount: type === "percent" ? maxDiscount : "",
+        })),
         deliveryFee: delivery,
         customAmounts: custom,
       });
@@ -326,7 +331,8 @@ export default function CreateBillForm({ people, currency }) {
             </button>
           </div>
           <p className="text-xs text-slate-500">
-            เช่น ซื้อครบ 300 ลด 40, ครบ 500 ลด 80 ระบบจะใช้ขั้นที่ลดได้มากที่สุดที่ยอดค่าอาหารถึง
+            เช่น ซื้อครบ 300 ลด 40, ลด 20% สูงสุด 100 ระบบจะใช้ขั้นที่ลดได้มากที่สุดที่ยอดค่าอาหารถึง
+            (ไม่กรอกยอดขั้นต่ำ = ไม่มีขั้นต่ำ, ไม่กรอกสูงสุด = ไม่จำกัด)
           </p>
 
           {tiers.length > 0 && (
@@ -350,7 +356,7 @@ export default function CreateBillForm({ people, currency }) {
                       className="input !w-28"
                       value={t.minSpend}
                       onChange={(e) => updateTier(t.key, { minSpend: e.target.value })}
-                      placeholder="0"
+                      placeholder="ไม่มีขั้นต่ำ"
                     />
                     <label htmlFor={`tier-val-${t.key}`}>ลด</label>
                     <input
@@ -373,6 +379,23 @@ export default function CreateBillForm({ people, currency }) {
                       <option value="amount">{currency}</option>
                       <option value="percent">%</option>
                     </select>
+                    {t.type === "percent" && (
+                      <>
+                        <label htmlFor={`tier-max-${t.key}`}>สูงสุด</label>
+                        <input
+                          id={`tier-max-${t.key}`}
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          step="0.01"
+                          className="input !w-28"
+                          value={t.maxDiscount}
+                          onChange={(e) => updateTier(t.key, { maxDiscount: e.target.value })}
+                          placeholder="ไม่จำกัด"
+                        />
+                        <span>{currency}</span>
+                      </>
+                    )}
                     {active && <span className="text-xs font-medium text-green-700">✓ ใช้ขั้นนี้</span>}
                     <button
                       type="button"

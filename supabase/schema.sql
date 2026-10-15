@@ -119,7 +119,8 @@ create trigger on_auth_user_created
 alter table public.bills add column if not exists subtotal numeric(12, 2) not null default 0;
 alter table public.bills add column if not exists discount_amount numeric(12, 2) not null default 0;
 alter table public.bills add column if not exists delivery_fee numeric(12, 2) not null default 0;
--- ขั้นส่วนลด เช่น [{"minSpend":300,"type":"amount","value":40}]
+-- ขั้นส่วนลด เช่น [{"minSpend":300,"type":"amount","value":40},{"minSpend":0,"type":"percent","value":20,"maxDiscount":100}]
+-- minSpend = 0 คือไม่มียอดขั้นต่ำ, maxDiscount (ไม่บังคับ) ใช้กับ percent เท่านั้น
 alter table public.bills add column if not exists discount_tiers jsonb not null default '[]'::jsonb;
 
 -- รายการเมนูในบิล

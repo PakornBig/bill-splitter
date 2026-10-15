@@ -13,7 +13,7 @@ const TIER_TYPES = ["amount", "percent"];
  * input = {
  *   title, note, splitType, participants: string[],
  *   items: { name, price, qty, eaters: string[] }[],
- *   tiers: { minSpend, type, value }[],
+ *   tiers: { minSpend?, type, value, maxDiscount? }[],
  *   deliveryFee, customAmounts: { [personId]: number }
  * }
  */
@@ -54,14 +54,25 @@ export async function createBill(input) {
   const tiers = [];
   for (const t of Array.isArray(input?.tiers) ? input.tiers : []) {
     if (t?.value === "" || t?.value == null) continue;
+    // ยอดขั้นต่ำไม่บังคับ (ว่าง = ไม่มีขั้นต่ำ)
     const minSpend = Number(t.minSpend) || 0;
     const value = Number(t.value);
     const type = TIER_TYPES.includes(t.type) ? t.type : "amount";
-    if (minSpend < 0 || !Number.isFinite(value) || value <= 0) {
+    if (!Number.isFinite(minSpend) || minSpend < 0 || !Number.isFinite(value) || value <= 0) {
       return { error: "ขั้นส่วนลดไม่ถูกต้อง" };
     }
     if (type === "percent" && value > 100) return { error: "ส่วนลดเปอร์เซ็นต์ต้องไม่เกิน 100%" };
-    tiers.push({ minSpend, type, value });
+
+    const tier = { minSpend, type, value };
+    // ส่วนลดสูงสุด ใช้กับแบบเปอร์เซ็นต์เท่านั้น (ว่าง = ไม่จำกัด)
+    if (type === "percent" && t.maxDiscount !== "" && t.maxDiscount != null) {
+      const maxDiscount = Number(t.maxDiscount);
+      if (!Number.isFinite(maxDiscount) || maxDiscount < 0) {
+        return { error: "ส่วนลดสูงสุดไม่ถูกต้อง" };
+      }
+      if (maxDiscount > 0) tier.maxDiscount = maxDiscount;
+    }
+    tiers.push(tier);
   }
 
   const deliveryFee = Number(input?.deliveryFee) || 0;

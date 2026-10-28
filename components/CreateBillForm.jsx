@@ -120,6 +120,11 @@ export default function CreateBillForm({ people, currency, bill = null }) {
     customAmounts: custom,
   });
 
+  // ยอดรวมที่เก็บจากทุกคน (หลังปัดเศษขึ้น อาจมากกว่ายอดสุทธิ)
+  const collectedCents = shares.error
+    ? 0
+    : participantIds.reduce((s, id) => s + (shares.details[id]?.amount ?? 0), 0);
+
   const filledItems = items.filter((it) => it.name.trim() || it.price !== "");
   const pieceCount = filledItems.reduce((s, it) => s + (Math.floor(Number(it.qty)) || 0), 0);
 
@@ -564,6 +569,14 @@ export default function CreateBillForm({ people, currency, bill = null }) {
             <dt>ยอดสุทธิ</dt>
             <dd>{fm(calc.totalCents)}</dd>
           </div>
+          {collectedCents > calc.totalCents && (
+            <div className="flex justify-between text-xs text-slate-500">
+              <dt>ยอดเก็บจริงหลังปัดเศษขึ้นเป็นบาทเต็ม</dt>
+              <dd>
+                {fm(collectedCents)} (+{fm(collectedCents - calc.totalCents)})
+              </dd>
+            </div>
+          )}
         </dl>
 
         {participants.length > 0 && (
@@ -588,11 +601,17 @@ export default function CreateBillForm({ people, currency, bill = null }) {
                   ) : (
                     <div className="text-right">
                       <span className="text-sm font-semibold text-slate-900">{fm(d?.amount ?? 0)}</span>
-                      {splitType === "by_item" && d && (d.discount > 0 || d.delivery > 0) && (
+                      {splitType === "by_item" && d && (d.discount > 0 || d.delivery > 0 || d.rounding > 0) && (
                         <p className="text-xs text-slate-400">
                           อาหาร {fm(d.food)}
                           {d.discount > 0 && ` − ลด ${fm(d.discount)}`}
                           {d.delivery > 0 && ` + ส่ง ${fm(d.delivery)}`}
+                          {d.rounding > 0 && ` + ปัดเศษ ${fm(d.rounding)}`}
+                        </p>
+                      )}
+                      {splitType === "equal" && d?.rounding > 0 && (
+                        <p className="text-xs text-slate-400">
+                          {fm(d.amount - d.rounding)} + ปัดเศษ {fm(d.rounding)}
                         </p>
                       )}
                     </div>

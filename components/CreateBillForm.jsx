@@ -3,7 +3,7 @@
 import { useRef, useState, useTransition } from "react";
 import { createBill, updateBill } from "@/app/(app)/bills/actions";
 import { formatMoney } from "@/lib/utils";
-import { calcBill, computeShares, fromCents, itemCents, toCents } from "@/lib/billCalc";
+import { calcBill, computeShares, fromCents, itemCents, nextTier, toCents } from "@/lib/billCalc";
 
 const SPLIT_TYPES = [
   { value: "by_item", label: "หารตามเมนู", hint: "แต่ละคนจ่ายตามเมนูที่กิน" },
@@ -108,6 +108,8 @@ export default function CreateBillForm({ people, currency, bill = null }) {
   const nameOf = (id) => people.find((p) => p.id === id)?.name ?? "";
 
   const calc = calcBill({ items, tiers, deliveryFee: delivery });
+  // index ของขั้นที่ถูกใช้ -> ยอดที่ลดจริง (สตางค์)
+  const appliedCents = Object.fromEntries(calc.appliedTiers.map((a) => [a.tierIndex, a.cents]));
   const shares = computeShares({
     splitType,
     participants: participantIds,
@@ -176,6 +178,112 @@ export default function CreateBillForm({ people, currency, bill = null }) {
     setTiers((prev) => prev.map((t) => (t.key === key ? { ...t, ...patch } : t)));
   const removeTier = (key) => setTiers((prev) => prev.filter((t) => t.key !== key));
   const addTier = () => setTiers((prev) => [...prev, blankTier(nextKey())]);
+  const upcoming = nextTier(tiers, calc.subtotalCents);
+
+  /** รายการขั้นส่วนลด */
+  function renderTiers() {
+    return (
+      <div>
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold text-slate-900">ส่วนลดแบบขั้นบันได</h2>
+          <button type="button" onClick={addTier} className="text-sm font-medium text-brand-600 hover:underline">
+            ＋ เพิ่มขั้น
+          </button>
+        </div>
+        <p className="text-xs text-slate-500">
+          เช่น ลด 8%, ครบ 300 ลด 40, ครบ 500 ลด 15% สูงสุด 100 ทุกขั้นที่ค่าอาหารถึงจะถูกใช้ซ้อนกัน
+          โดยลดตามลำดับจากบนลงล่าง ขั้นแบบ % คิดจากยอดหลังหักขั้นก่อนหน้า
+          (ไม่กรอกยอดขั้นต่ำ = ไม่มีขั้นต่ำ, ไม่กรอกสูงสุด = ไม่จำกัด)
+        </p>
+
+        {tiers.length > 0 && (
+          <ul className="mt-3 space-y-2">
+            {tiers.map((t, idx) => {
+              const active = idx in appliedCents;
+              return (
+                <li
+                  key={t.key}
+                  className={`flex flex-wrap items-center gap-2 rounded-lg border p-2 text-sm ${
+                    active ? "border-green-400 bg-green-50" : "border-slate-200"
+                  }`}
+                >
+                  <label htmlFor={`tier-min-${t.key}`}>ซื้อครบ</label>
+                  <input
+                    id={`tier-min-${t.key}`}
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    className="input !w-28"
+                    value={t.minSpend}
+                    onChange={(e) => updateTier(t.key, { minSpend: e.target.value })}
+                    placeholder="ไม่มีขั้นต่ำ"
+                  />
+                  <label htmlFor={`tier-val-${t.key}`}>ลด</label>
+                  <input
+                    id={`tier-val-${t.key}`}
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    className="input !w-24"
+                    value={t.value}
+                    onChange={(e) => updateTier(t.key, { value: e.target.value })}
+                    placeholder="0"
+                  />
+                  <select
+                    aria-label="ประเภทส่วนลด"
+                    className="input !w-auto"
+                    value={t.type}
+                    onChange={(e) => updateTier(t.key, { type: e.target.value })}
+                  >
+                    <option value="amount">{currency}</option>
+                    <option value="percent">%</option>
+                  </select>
+                  {t.type === "percent" && (
+                    <>
+                      <label htmlFor={`tier-max-${t.key}`}>สูงสุด</label>
+                      <input
+                        id={`tier-max-${t.key}`}
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        step="0.01"
+                        className="input !w-28"
+                        value={t.maxDiscount}
+                        onChange={(e) => updateTier(t.key, { maxDiscount: e.target.value })}
+                        placeholder="ไม่จำกัด"
+                      />
+                      <span>{currency}</span>
+                    </>
+                  )}
+                  {active && (
+                    <span className="text-xs font-medium text-green-700">
+                      ✓ ใช้ขั้นนี้ (−{fm(appliedCents[idx])})
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeTier(t.key)}
+                    aria-label={`ลบขั้นที่ ${idx + 1}`}
+                    className="ml-auto rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                  >
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {upcoming && (
+          <p className="mt-2 text-xs text-brand-700">
+            ซื้อเพิ่มอีก {fm(upcoming.missingCents)} เพื่อได้ส่วนลดขั้นถัดไป (ครบ {fm(upcoming.minCents)})
+          </p>
+        )}
+      </div>
+    );
+  }
 
   // ---------- บันทึก ----------
   function submit(e) {
@@ -415,94 +523,7 @@ export default function CreateBillForm({ people, currency, bill = null }) {
 
       {/* ส่วนลด & ค่าส่ง */}
       <section className="card space-y-4">
-        <div>
-          <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-slate-900">ส่วนลดแบบขั้นบันได</h2>
-            <button type="button" onClick={addTier} className="text-sm font-medium text-brand-600 hover:underline">
-              ＋ เพิ่มขั้น
-            </button>
-          </div>
-          <p className="text-xs text-slate-500">
-            เช่น ซื้อครบ 300 ลด 40, ลด 20% สูงสุด 100 ระบบจะใช้ขั้นที่ลดได้มากที่สุดที่ยอดค่าอาหารถึง
-            (ไม่กรอกยอดขั้นต่ำ = ไม่มีขั้นต่ำ, ไม่กรอกสูงสุด = ไม่จำกัด)
-          </p>
-
-          {tiers.length > 0 && (
-            <ul className="mt-3 space-y-2">
-              {tiers.map((t, idx) => {
-                const active = calc.tierIndex === idx;
-                return (
-                  <li
-                    key={t.key}
-                    className={`flex flex-wrap items-center gap-2 rounded-lg border p-2 text-sm ${
-                      active ? "border-green-400 bg-green-50" : "border-slate-200"
-                    }`}
-                  >
-                    <label htmlFor={`tier-min-${t.key}`}>ซื้อครบ</label>
-                    <input
-                      id={`tier-min-${t.key}`}
-                      type="number"
-                      inputMode="decimal"
-                      min="0"
-                      step="0.01"
-                      className="input !w-28"
-                      value={t.minSpend}
-                      onChange={(e) => updateTier(t.key, { minSpend: e.target.value })}
-                      placeholder="ไม่มีขั้นต่ำ"
-                    />
-                    <label htmlFor={`tier-val-${t.key}`}>ลด</label>
-                    <input
-                      id={`tier-val-${t.key}`}
-                      type="number"
-                      inputMode="decimal"
-                      min="0"
-                      step="0.01"
-                      className="input !w-24"
-                      value={t.value}
-                      onChange={(e) => updateTier(t.key, { value: e.target.value })}
-                      placeholder="0"
-                    />
-                    <select
-                      aria-label="ประเภทส่วนลด"
-                      className="input !w-auto"
-                      value={t.type}
-                      onChange={(e) => updateTier(t.key, { type: e.target.value })}
-                    >
-                      <option value="amount">{currency}</option>
-                      <option value="percent">%</option>
-                    </select>
-                    {t.type === "percent" && (
-                      <>
-                        <label htmlFor={`tier-max-${t.key}`}>สูงสุด</label>
-                        <input
-                          id={`tier-max-${t.key}`}
-                          type="number"
-                          inputMode="decimal"
-                          min="0"
-                          step="0.01"
-                          className="input !w-28"
-                          value={t.maxDiscount}
-                          onChange={(e) => updateTier(t.key, { maxDiscount: e.target.value })}
-                          placeholder="ไม่จำกัด"
-                        />
-                        <span>{currency}</span>
-                      </>
-                    )}
-                    {active && <span className="text-xs font-medium text-green-700">✓ ใช้ขั้นนี้</span>}
-                    <button
-                      type="button"
-                      onClick={() => removeTier(t.key)}
-                      aria-label={`ลบขั้นที่ ${idx + 1}`}
-                      className="ml-auto rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                    >
-                      ✕
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+        {renderTiers()}
 
         <div className="sm:w-1/2">
           <label className="label" htmlFor="delivery">ค่าส่ง ({currency})</label>

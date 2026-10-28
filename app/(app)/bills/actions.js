@@ -58,6 +58,7 @@ function parseBillInput(input) {
     }
     if (type === "percent" && value > 100) return { error: "ส่วนลดเปอร์เซ็นต์ต้องไม่เกิน 100%" };
 
+    // ลำดับใน tiers มีผล: ขั้นถูกใช้ซ้อนกันตามลำดับ (ดู pickDiscount)
     const tier = { minSpend, type, value };
     // ส่วนลดสูงสุด ใช้กับแบบเปอร์เซ็นต์เท่านั้น (ว่าง = ไม่จำกัด)
     if (type === "percent" && t.maxDiscount !== "" && t.maxDiscount != null) {
